@@ -31,6 +31,85 @@
 
 ---
 
+## How to Use Skyld
+
+### Installation
+
+1. **Sync the environment with `uv` (requires Python 3.12):**
+   ```bash
+   uv sync --python 3.12
+   ```
+
+2. **Install `SkProtectPytorch`:**
+   Ensure you have a valid `SkProtectPytorch` wheel (`.whl`) file, and install it directly into your `uv` environment:
+   ```bash
+   uv pip install path/to/<skprotect>.whl
+   ```
+
+<details>
+<summary><b>🔧 Troubleshooting: <code>torchcodec</code> issues</b> (Click to expand)</summary>
+
+If you encounter shared library issues with `torchcodec`, export the following environment variables (assuming you are in the project root directory):
+
+```bash
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$(pwd)/.venv/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH"
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0
+```
+
+You can verify that the issue is resolved by running:
+```bash
+uv run python -c "from torchcodec.decoders import VideoDecoder; print('SUCCESS: TorchCodec is loaded')"
+```
+</details>
+
+---
+
+### Usage
+
+> **⚠️ Note on Precision:** Protected models currently only support `fp32`. (`bf16` is not yet supported for ONNX export).
+
+#### 1. Export and Protect Models to ONNX
+Run the export script with the `--protect` and `--precision fp32` flags:
+
+```bash
+uv run scripts/deployment/export_onnx_n1d7.py \
+  --model-path checkpoints/GR00T-N1.7-LIBERO/libero_10 \
+  --dataset-path demo_data/libero_demo \
+  --embodiment-tag LIBERO_PANDA \
+  --export-mode full_pipeline \
+  --protect \
+  --precision fp32
+```
+
+#### 2. Organize Protected ONNX Models
+By default, the exported models and the `export_metadata.json` configuration file are generated in `outputs/default_app`. Run the helper script to move them to the target deployment directory (`./gr00t_trt_deployment/onnx/protected`):
+
+```bash
+uv run python move_protected_models.py
+```
+
+#### 3. Build TensorRT Engines
+Compile the protected ONNX models into TensorRT engines:
+
+```bash
+uv run scripts/deployment/build_tensorrt_engine.py \
+  --mode full_pipeline \
+  --onnx-dir ./gr00t_trt_deployment/onnx/protected \
+  --engine-dir ./gr00t_trt_deployment/engines/protected \
+  --precision fp32
+```
+
+**Debugging / Single Engine Build:**
+If you encounter an issue with a specific ONNX model during the full pipeline build, you can build the engines individually:
+
+```bash
+uv run scripts/deployment/build_tensorrt_engine.py \
+  --onnx ./gr00t_trt_deployment/onnx/protected/vit_fp32.onnx \
+  --engine ./gr00t_trt_deployment/engines/protected/vit_fp32.engine \
+  --precision fp32
+```
+
+
 ## NVIDIA Isaac GR00T
 
 <table style="width:100%; table-layout:fixed;">
