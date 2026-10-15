@@ -47,8 +47,6 @@ dependencies = [
     "deepspeed==0.17.6; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # triton is needed on aarch64 (GB200) but ships with torch on x86_64
     "triton==3.5.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    # flash-attn wheels are sourced from `[tool.uv.sources]` below (official cp312 wheels for x86_64 and aarch64).
-    "flash-attn==2.8.3; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "onnx>=1.20.0",
     "onnxscript",
     # cu12 wheels only exist for x86_64; Blackwell / aarch64 requires cu13.
@@ -56,6 +54,8 @@ dependencies = [
     "tensorrt-cu13>=10.15.1.29; platform_machine == 'aarch64'",
     "tensorrt-cu12-libs>=10.15.1.29; platform_machine == 'x86_64'",
     "tensorrt-cu13-libs>=10.15.1.29; platform_machine == 'aarch64'",
+    # flash-attn wheels are sourced from `[tool.uv.sources]` below (official cp312 wheels for x86_64 and aarch64).
+    "flash-attn==2.8.3; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
 ]
 
 [project.optional-dependencies]

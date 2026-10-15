@@ -125,11 +125,11 @@ class PipelineComponent:
 # subset from it; the deployment tests bind it against the verify-side loaders.
 FULL_PIPELINE_COMPONENTS: tuple[PipelineComponent, ...] = (
     PipelineComponent("ViT", ("vit_fp32.onnx", "vit_bf16.onnx"), "vit.engine"),
-    PipelineComponent("LLM", ("llm_bf16.onnx",), "llm_bf16.engine"),
+    PipelineComponent("LLM", ("llm_bf16.onnx", "llm_fp32.onnx"), "llm_bf16.engine"),
     PipelineComponent("VL Self-Attention", ("vl_self_attention.onnx",), "vl_self_attention.engine"),
     PipelineComponent("State Encoder", ("state_encoder.onnx",), "state_encoder.engine"),
     PipelineComponent("Action Encoder", ("action_encoder.onnx",), "action_encoder.engine"),
-    PipelineComponent("DiT", ("dit_bf16.onnx",), "dit_bf16.engine"),
+    PipelineComponent("DiT", ("dit_bf16.onnx", "dit_fp32.onnx"), "dit_bf16.engine"),
     PipelineComponent("Action Decoder", ("action_decoder.onnx",), "action_decoder.engine"),
 )
 

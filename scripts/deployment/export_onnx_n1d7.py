@@ -70,11 +70,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.onnx
 import tyro
+from skprotect_pytorch.protect import SkProtectorPyTorch
 
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+current_module_index = 0
+
+
+def one_out_of_ten_filter(_name, _module):
+    """
+    Filter for parametter layer_filter.
+    ----
+    Select one layer out of ten while visiting the graph (breadth-first).
+    """
+    global current_module_index
+    res = current_module_index % 10 == 0
+    current_module_index += 1
+    return res
 
 
 def _consolidate_external_data(onnx_path: str) -> None:
@@ -529,7 +545,9 @@ def _assert_vision_rotary_matches_analytic(vision, vision_config, *, atol=1e-5, 
         )
 
 
-def export_vit_to_onnx(policy, output_dir, captured_vit, use_bf16=True, batch_size=1):
+def export_vit_to_onnx(
+    policy, output_dir, captured_vit, use_bf16=True, batch_size=1, protect=False
+):
     """Export Qwen3-VL Vision Model to ONNX.
 
     Pre-computes position/rotary embeddings for the captured grid_thw to avoid
@@ -592,17 +610,46 @@ def export_vit_to_onnx(policy, output_dir, captured_vit, use_bf16=True, batch_si
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            wrapper,
-            (pixel_values,),
-            output_path,
-            input_names=["pixel_values"],
-            output_names=output_names,
-            opset_version=19,
-            do_constant_folding=True,
-            export_params=True,
-            dynamo=False,
-        )
+        if protect:
+            ONNX_EXPORT_PARAMETERS = {
+                "input_names": ["pixel_values"],
+                "output_names": output_names,
+                "opset_version": 19,
+                "dynamo": False,
+                "export_params": True,
+            }
+            model_name = f"vit_{precision_tag}"
+            input_tensors = [pixel_values]
+            model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            protector = SkProtectorPyTorch(save_logs=False)
+            protector.protect_new_model(
+                model=wrapper,
+                model_name=model_name,
+                input_tensors=input_tensors,
+                # layer_filter=one_out_of_ten_filter,
+                model_export_formats=model_export_formats,
+                deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+                onnx_params=ONNX_EXPORT_PARAMETERS,
+                inductor_configs={},
+                save_original=True,
+                dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+                test_key=False,
+                protect_half=True,
+                force_bypass_export_export=True,
+            )
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+        else:
+            torch.onnx.export(
+                wrapper,
+                (pixel_values,),
+                output_path,
+                input_names=["pixel_values"],
+                output_names=output_names,
+                opset_version=19,
+                do_constant_folding=True,
+                export_params=True,
+                dynamo=False,
+            )
 
     logger.info("  ViT exported successfully!")
     _consolidate_external_data(output_path)
@@ -629,7 +676,9 @@ def export_vit_to_onnx(policy, output_dir, captured_vit, use_bf16=True, batch_si
 # ============================================================
 
 
-def export_llm_to_onnx(policy, captured_llm, output_dir, use_bf16=True, batch_size=1):
+def export_llm_to_onnx(
+    policy, captured_llm, output_dir, use_bf16=True, batch_size=1, protect=False
+):
     """Export the Qwen3-VL text model (LLM) to ONNX.
 
     The LLM receives inputs_embeds (with vision tokens already scattered in),
@@ -885,18 +934,61 @@ def export_llm_to_onnx(policy, captured_llm, output_dir, use_bf16=True, batch_si
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            wrapper,
-            tuple(export_inputs),
-            output_path,
-            input_names=input_names,
-            output_names=["embeddings"],
-            opset_version=19,
-            do_constant_folding=True,
-            dynamic_axes=llm_dynamic_axes,
-            export_params=True,
-            dynamo=False,
-        )
+        if protect:
+            model_name = f"llm_{precision_tag}"
+            # ONNX_EXPORT_PARAMETERS = {
+            #     "input_names": input_names,
+            #     "output_names": ["embeddings"],
+            #     "opset_version": 19,
+            #     "dynamo": False,
+            #     "dynamic_axes": llm_dynamic_axes,
+            #     "export_params": True,
+            # }
+            # input_tensors = export_inputs
+            # model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            # protector = SkProtectorPyTorch(save_logs=False)
+            # protector.protect_new_model(
+            #     model=wrapper,
+            #     model_name=model_name,
+            #     input_tensors=input_tensors,
+            #     layer_filter=one_out_of_ten_filter,
+            #     model_export_formats=model_export_formats,
+            #     deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+            #     onnx_params=ONNX_EXPORT_PARAMETERS,
+            #     inductor_configs={},
+            #     save_original=True,
+            #     dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+            #     test_key=False,
+            #     protect_half=True,
+            #     force_bypass_export_export=True,
+            # )
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            torch.onnx.export(
+                wrapper,
+                tuple(export_inputs),
+                output_path,
+                input_names=input_names,
+                output_names=["embeddings"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamic_axes=llm_dynamic_axes,
+                export_params=True,
+                dynamo=False,
+            )
+        else:
+            torch.onnx.export(
+                wrapper,
+                tuple(export_inputs),
+                output_path,
+                input_names=input_names,
+                output_names=["embeddings"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamic_axes=llm_dynamic_axes,
+                export_params=True,
+                dynamo=False,
+            )
 
     logger.info("  LLM exported successfully!")
     _consolidate_external_data(output_path)
@@ -938,7 +1030,9 @@ def prepare_observation(policy, dataset, traj_idx=0):
 # ============================================================
 
 
-def export_vl_self_attention_to_onnx(policy, output_dir, vl_seq_len, use_bf16=True, batch_size=1):
+def export_vl_self_attention_to_onnx(
+    policy, output_dir, vl_seq_len, use_bf16=True, batch_size=1, protect=False
+):
     """Export the vl_self_attention (SelfAttentionTransformer) to ONNX.
 
     This module sits between VLLN and the DiT, transforming backbone
@@ -970,20 +1064,52 @@ def export_vl_self_attention_to_onnx(policy, output_dir, vl_seq_len, use_bf16=Tr
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            model,
-            (hidden_states,),
-            output_path,
-            input_names=["hidden_states"],
-            output_names=["output"],
-            dynamic_axes={
-                "hidden_states": {1: "seq_len"},
-                "output": {1: "seq_len"},
-            },
-            opset_version=19,
-            do_constant_folding=True,
-            dynamo=False,
-        )
+        if protect:
+            ONNX_EXPORT_PARAMETERS = {
+                "input_names": ["hidden_states"],
+                "output_names": ["output"],
+                "opset_version": 19,
+                "dynamo": False,
+                "dynamic_axes": {
+                    "hidden_states": {1: "seq_len"},
+                    "output": {1: "seq_len"},
+                },
+            }
+            model_name = "vl_self_attention"
+            input_tensors = [hidden_states]
+            model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            protector = SkProtectorPyTorch(save_logs=False)
+            protector.protect_new_model(
+                model=model,
+                model_name=model_name,
+                input_tensors=input_tensors,
+                # layer_filter=one_out_of_ten_filter,
+                model_export_formats=model_export_formats,
+                deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+                onnx_params=ONNX_EXPORT_PARAMETERS,
+                inductor_configs={},
+                save_original=True,
+                dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+                test_key=False,
+                protect_half=True,
+                force_bypass_export_export=True,
+            )
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+        else:
+            torch.onnx.export(
+                model,
+                (hidden_states,),
+                output_path,
+                input_names=["hidden_states"],
+                output_names=["output"],
+                dynamic_axes={
+                    "hidden_states": {1: "seq_len"},
+                    "output": {1: "seq_len"},
+                },
+                opset_version=19,
+                do_constant_folding=True,
+                dynamo=False,
+            )
 
     logger.info("  VL Self-Attention exported successfully!")
     verify_onnx_export(output_path)
@@ -995,7 +1121,7 @@ def export_vl_self_attention_to_onnx(policy, output_dir, vl_seq_len, use_bf16=Tr
 # ============================================================
 
 
-def export_state_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1):
+def export_state_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1, protect=False):
     """Export the state encoder (CategorySpecificMLP) to ONNX.
 
     N1.7 change: input_dim = max_state_dim * state_history_length.
@@ -1032,21 +1158,67 @@ def export_state_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            model,
-            (state, embodiment_id),
-            output_path,
-            input_names=["state", "embodiment_id"],
-            output_names=["output"],
-            opset_version=19,
-            do_constant_folding=True,
-            # torch 2.9 flipped torch.onnx.export's dynamo default to True, but the
-            # dynamo graph for the state/action encoder + action decoder fuses into a
-            # Myelin ForeignNode (Unsqueeze...add) that TRT 10.15's NVRTC backend can't
-            # compile at bs=2 on Blackwell. Pin the legacy exporter for these three
-            # (ViT/LLM/VL-SA stay on dynamo — legacy can't export Qwen3VL memory_format).
-            dynamo=False,
-        )
+        if protect:
+            # ONNX_EXPORT_PARAMETERS = {
+            #     "input_names": ["state", "embodiment_id"],
+            #     "output_names": ["output"],
+            #     "opset_version": 19,
+            #     "dynamo": False,
+            # }
+            # model_name = "state_encoder"
+            # input_tensors = [state, embodiment_id]
+            # model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            # protector = SkProtectorPyTorch(save_logs=False)
+            # protector.protect_new_model(
+            #     model=model,
+            #     model_name=model_name,
+            #     input_tensors=input_tensors,
+            #     # layer_filter=one_out_of_ten_filter,
+            #     model_export_formats=model_export_formats,
+            #     deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+            #     onnx_params=ONNX_EXPORT_PARAMETERS,
+            #     inductor_configs={},
+            #     save_original=True,
+            #     dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+            #     test_key=False,
+            #     protect_half=True,
+            #     force_bypass_export_export=True,
+            # )
+            model_name = "state_encoder"
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            torch.onnx.export(
+                model,
+                (state, embodiment_id),
+                output_path,
+                input_names=["state", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                # torch 2.9 flipped torch.onnx.export's dynamo default to True, but the
+                # dynamo graph for the state/action encoder + action decoder fuses into a
+                # Myelin ForeignNode (Unsqueeze...add) that TRT 10.15's NVRTC backend can't
+                # compile at bs=2 on Blackwell. Pin the legacy exporter for these three
+                # (ViT/LLM/VL-SA stay on dynamo — legacy can't export Qwen3VL memory_format).
+                dynamo=False,
+            )
+
+        else:
+            torch.onnx.export(
+                model,
+                (state, embodiment_id),
+                output_path,
+                input_names=["state", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                # torch 2.9 flipped torch.onnx.export's dynamo default to True, but the
+                # dynamo graph for the state/action encoder + action decoder fuses into a
+                # Myelin ForeignNode (Unsqueeze...add) that TRT 10.15's NVRTC backend can't
+                # compile at bs=2 on Blackwell. Pin the legacy exporter for these three
+                # (ViT/LLM/VL-SA stay on dynamo — legacy can't export Qwen3VL memory_format).
+                dynamo=False,
+            )
 
     logger.info("  State Encoder exported successfully!")
     verify_onnx_export(output_path)
@@ -1058,7 +1230,7 @@ def export_state_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1
 # ============================================================
 
 
-def export_action_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1):
+def export_action_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1, protect=False):
     """Export the action encoder (MultiEmbodimentActionEncoder) to ONNX.
 
     Input: actions [B, action_horizon, max_action_dim], timesteps [B], embodiment_id [B]
@@ -1089,16 +1261,56 @@ def export_action_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            model,
-            (actions, timesteps, embodiment_id),
-            output_path,
-            input_names=["actions", "timesteps", "embodiment_id"],
-            output_names=["output"],
-            opset_version=19,
-            do_constant_folding=True,
-            dynamo=False,
-        )
+        if protect:
+            # ONNX_EXPORT_PARAMETERS = {
+            #     "input_names": ["actions", "timesteps", "embodiment_id"],
+            #     "output_names": ["output"],
+            #     "opset_version": 19,
+            #     "dynamo": False,
+            # }
+            # model_name = "action_encoder"
+            # input_tensors = [actions, timesteps, embodiment_id]
+            # model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            # protector = SkProtectorPyTorch(save_logs=False)
+            # protector.protect_new_model(
+            #     model=model,
+            #     model_name=model_name,
+            #     input_tensors=input_tensors,
+            #     # layer_filter=one_out_of_ten_filter,
+            #     model_export_formats=model_export_formats,
+            #     deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+            #     onnx_params=ONNX_EXPORT_PARAMETERS,
+            #     inductor_configs={},
+            #     save_original=True,
+            #     dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+            #     test_key=False,
+            #     protect_half=True,
+            #     force_bypass_export_export=True,
+            # )
+            model_name = "action_encoder"
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            torch.onnx.export(
+                model,
+                (actions, timesteps, embodiment_id),
+                output_path,
+                input_names=["actions", "timesteps", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamo=False,
+            )
+        else:
+            torch.onnx.export(
+                model,
+                (actions, timesteps, embodiment_id),
+                output_path,
+                input_names=["actions", "timesteps", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamo=False,
+            )
 
     logger.info("  Action Encoder exported successfully!")
     verify_onnx_export(output_path)
@@ -1110,7 +1322,9 @@ def export_action_encoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=
 # ============================================================
 
 
-def export_dit_to_onnx(policy, captured_inputs, output_path, use_bf16=True, batch_size=1):
+def export_dit_to_onnx(
+    policy, captured_inputs, output_path, use_bf16=True, batch_size=1, protect=False
+):
     """Export the DiT (AlternateVLDiT) to ONNX.
 
     N1.7: image_mask and backbone_attention_mask are always present
@@ -1205,18 +1419,48 @@ def export_dit_to_onnx(policy, captured_inputs, output_path, use_bf16=True, batc
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            wrapped_model,
-            tuple(export_inputs),
-            output_path,
-            input_names=input_names,
-            output_names=["output"],
-            opset_version=19,
-            do_constant_folding=True,
-            export_params=True,
-            dynamic_axes=dit_dynamic_axes,
-            dynamo=False,  # DiT specializes vl_seq_len under dynamo; legacy exporter needed
-        )
+        if protect:
+            ONNX_EXPORT_PARAMETERS = {
+                "input_names": input_names,
+                "output_names": ["output"],
+                "opset_version": 19,
+                "dynamo": False,
+                "export_params": True,
+                "dynamic_axes": dit_dynamic_axes,
+            }
+            model_name = "dit_fp32" if not use_bf16 else "dit_bf16"
+            input_tensors = export_inputs
+            model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            protector = SkProtectorPyTorch(save_logs=False)
+            protector.protect_new_model(
+                model=wrapped_model,
+                model_name=model_name,
+                input_tensors=input_tensors,
+                layer_filter=one_out_of_ten_filter,
+                model_export_formats=model_export_formats,
+                deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+                onnx_params=ONNX_EXPORT_PARAMETERS,
+                inductor_configs={},
+                save_original=True,
+                dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+                test_key=False,
+                protect_half=True,
+                force_bypass_export_export=True,
+            )
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+        else:
+            torch.onnx.export(
+                wrapped_model,
+                tuple(export_inputs),
+                output_path,
+                input_names=input_names,
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                export_params=True,
+                dynamic_axes=dit_dynamic_axes,
+                dynamo=False,  # DiT specializes vl_seq_len under dynamo; legacy exporter needed
+            )
 
     logger.info("  DiT exported successfully!")
 
@@ -1234,7 +1478,7 @@ def export_dit_to_onnx(policy, captured_inputs, output_path, use_bf16=True, batc
 # ============================================================
 
 
-def export_action_decoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1):
+def export_action_decoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=1, protect=False):
     """Export the action decoder (CategorySpecificMLP) to ONNX.
 
     Input: model_output [B, sa_seq_len, hidden_size], embodiment_id [B]
@@ -1265,16 +1509,56 @@ def export_action_decoder_to_onnx(policy, output_dir, use_bf16=True, batch_size=
 
     logger.info(f"  Exporting to {output_path}...")
     with torch.inference_mode():
-        torch.onnx.export(
-            model,
-            (model_output, embodiment_id),
-            output_path,
-            input_names=["model_output", "embodiment_id"],
-            output_names=["output"],
-            opset_version=19,
-            do_constant_folding=True,
-            dynamo=False,
-        )
+        if protect:
+            # ONNX_EXPORT_PARAMETERS = {
+            #     "input_names": ["model_output", "embodiment_id"],
+            #     "output_names": ["output"],
+            #     "opset_version": 19,
+            #     "dynamo": False,
+            # }
+            # model_name = "action_decoder"
+            # input_tensors = [model_output, embodiment_id]
+            # model_export_formats = SkProtectorPyTorch.ExportFormat.ONNX
+            # protector = SkProtectorPyTorch(save_logs=False)
+            # protector.protect_new_model(
+            #     model=model,
+            #     model_name=model_name,
+            #     input_tensors=input_tensors,
+            #     # layer_filter=one_out_of_ten_filter,
+            #     model_export_formats=model_export_formats,
+            #     deployment_platform=SkProtectorPyTorch.ExportPlatform.LINUX,
+            #     onnx_params=ONNX_EXPORT_PARAMETERS,
+            #     inductor_configs={},
+            #     save_original=True,
+            #     dynamic_shapes=None,  # should be consistent with ONNX_EXPORT_PARAMETERS if onnx export
+            #     test_key=False,
+            #     protect_half=True,
+            #     force_bypass_export_export=True,
+            # )
+            model_name = "action_decoder"
+            output_path = f"outputs/default_app/{model_name}/{model_name}.onnx"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            torch.onnx.export(
+                model,
+                (model_output, embodiment_id),
+                output_path,
+                input_names=["model_output", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamo=False,
+            )
+        else:
+            torch.onnx.export(
+                model,
+                (model_output, embodiment_id),
+                output_path,
+                input_names=["model_output", "embodiment_id"],
+                output_names=["output"],
+                opset_version=19,
+                do_constant_folding=True,
+                dynamo=False,
+            )
 
     logger.info("  Action Decoder exported successfully!")
     verify_onnx_export(output_path)
@@ -1404,7 +1688,7 @@ def main(args):
         "backbone_embedding_dim": int(action_head_config.backbone_embedding_dim),
         "embodiment_tag": str(args.embodiment_tag),
         "export_mode": args.export_mode,
-        "precision": args.precision,
+        "precision": str(args.precision),
         "batch_size": args.batch_size,
     }
     # The ViT engine bakes pos/rotary buffers for this grid_thw and takes only
@@ -1414,23 +1698,28 @@ def main(args):
         export_metadata["vit_grid_thw"] = [
             [int(x) for x in row] for row in vit_capture.grid_thw.tolist()
         ]
-    os.makedirs(args.output_dir, exist_ok=True)
-    metadata_path = os.path.join(args.output_dir, "export_metadata.json")
+    metadata_dir = "outputs/default_app/" if args.protect else args.output_dir
+    os.makedirs(metadata_dir, exist_ok=True)
+    metadata_path = os.path.join(metadata_dir, "export_metadata.json")
     with open(metadata_path, "w") as f:
         json.dump(export_metadata, f, indent=2)
     logger.info(f"  Saved export metadata to {metadata_path}")
+
+    # Set to bf16 if bf16 else fp32
+    use_bf16 = True if args.precision == "bf16" else False
 
     # Step 4: Export
     bs = args.batch_size
     if args.export_mode == "dit_only":
         logger.info("\n[Step 4] Exporting DiT to ONNX (dit_only mode)...")
-        dit_output_path = os.path.join(args.output_dir, "dit_bf16.onnx")
+        dit_output_path = os.path.join(args.output_dir, f"dit_{args.precision}.onnx")
         export_dit_to_onnx(
             policy=policy,
             captured_inputs=dit_capture,
             output_path=dit_output_path,
-            use_bf16=True,
+            use_bf16=use_bf16,
             batch_size=bs,
+            protect=args.protect,
         )
 
     elif args.export_mode == "action_head":
@@ -1438,26 +1727,37 @@ def main(args):
 
         # 4a. State Encoder
         logger.info("\n--- [4a] State Encoder ---")
-        export_state_encoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_state_encoder_to_onnx(
+            policy, args.output_dir, use_bf16=use_bf16, batch_size=bs, protect=args.protect
+        )
 
         # 4b. Action Encoder
         logger.info("\n--- [4b] Action Encoder ---")
-        export_action_encoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_action_encoder_to_onnx(
+            policy, args.output_dir, use_bf16=use_bf16, batch_size=bs, protect=args.protect
+        )
 
         # 4c. DiT
         logger.info("\n--- [4c] DiT ---")
-        dit_output_path = os.path.join(args.output_dir, "dit_bf16.onnx")
+        dit_output_path = os.path.join(args.output_dir, f"dit_{args.precision}.onnx")
         export_dit_to_onnx(
             policy=policy,
             captured_inputs=dit_capture,
             output_path=dit_output_path,
-            use_bf16=True,
+            use_bf16=use_bf16,
             batch_size=bs,
+            protect=args.protect,
         )
 
         # 4d. Action Decoder
         logger.info("\n--- [4d] Action Decoder ---")
-        export_action_decoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_action_decoder_to_onnx(
+            policy,
+            args.output_dir,
+            use_bf16=use_bf16,
+            batch_size=bs,
+            protect=args.protect,
+        )
 
     elif args.export_mode == "full_pipeline":
         logger.info("\n[Step 4] Exporting full pipeline to ONNX...")
@@ -1466,40 +1766,70 @@ def main(args):
         # 4a. ViT — exported in FP32 to avoid TRT BF16 kernel fusion accuracy issues
         # ViT is patch-level: for batch_size > 1, num_patches scales by batch_size
         logger.info("\n--- [4a] ViT (Qwen3-VL Vision, FP32 for TRT accuracy) ---")
-        export_vit_to_onnx(policy, args.output_dir, vit_capture, use_bf16=False, batch_size=bs)
+        export_vit_to_onnx(
+            policy,
+            args.output_dir,
+            vit_capture,
+            use_bf16=use_bf16,
+            batch_size=bs,
+            protect=args.protect,
+        )
 
         # 4b. LLM
         logger.info("\n--- [4b] LLM (Qwen3-VL Text Model) ---")
-        export_llm_to_onnx(policy, llm_capture, args.output_dir, use_bf16=True, batch_size=bs)
+        export_llm_to_onnx(
+            policy,
+            llm_capture,
+            args.output_dir,
+            use_bf16=use_bf16,
+            batch_size=bs,
+            protect=args.protect,
+        )
 
         # 4c. VL Self-Attention (if present)
         logger.info("\n--- [4c] VL Self-Attention ---")
         export_vl_self_attention_to_onnx(
-            policy, args.output_dir, vl_seq_len=vl_seq_len, use_bf16=True, batch_size=bs
+            policy,
+            args.output_dir,
+            vl_seq_len=vl_seq_len,
+            use_bf16=use_bf16,
+            batch_size=bs,
+            protect=args.protect,
         )
 
         # 4d. State Encoder
         logger.info("\n--- [4d] State Encoder ---")
-        export_state_encoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_state_encoder_to_onnx(
+            policy,
+            args.output_dir,
+            use_bf16=use_bf16,
+            batch_size=bs,
+            protect=args.protect,
+        )
 
         # 4e. Action Encoder
         logger.info("\n--- [4e] Action Encoder ---")
-        export_action_encoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_action_encoder_to_onnx(
+            policy, args.output_dir, use_bf16=use_bf16, batch_size=bs, protect=args.protect
+        )
 
         # 4f. DiT
         logger.info("\n--- [4f] DiT ---")
-        dit_output_path = os.path.join(args.output_dir, "dit_bf16.onnx")
+        dit_output_path = os.path.join(args.output_dir, f"dit_{args.precision}.onnx")
         export_dit_to_onnx(
             policy=policy,
             captured_inputs=dit_capture,
             output_path=dit_output_path,
-            use_bf16=True,
+            use_bf16=use_bf16,
             batch_size=bs,
+            protect=args.protect,
         )
 
         # 4g. Action Decoder
         logger.info("\n--- [4g] Action Decoder ---")
-        export_action_decoder_to_onnx(policy, args.output_dir, use_bf16=True, batch_size=bs)
+        export_action_decoder_to_onnx(
+            policy, args.output_dir, use_bf16=use_bf16, batch_size=bs, protect=args.protect
+        )
 
     # Summary
     logger.info("\n" + "=" * 80)
@@ -1533,7 +1863,7 @@ class ExportConfig:
     export_mode: ExportMode = ExportMode.dit_only
     """Export mode: 'dit_only', 'action_head' (4 components), or 'full_pipeline' (ViT + action head)."""
 
-    precision: Literal["bf16"] = "bf16"
+    precision: Literal["bf16", "fp32"] = "bf16"
     """Export precision for the generated ONNX graph.
 
     Currently fixed to 'bf16': every Step 4 exporter passes a hardcoded
@@ -1545,6 +1875,8 @@ class ExportConfig:
 
     batch_size: int = 1
     """Batch size baked into the exported ONNX models (default: 1)."""
+
+    protect: bool = False
 
 
 if __name__ == "__main__":
