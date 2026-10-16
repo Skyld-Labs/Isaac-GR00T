@@ -169,3 +169,5 @@ offline_open_loop_eval_plots/
 /checkpoints/
 /gr00t_trt_deployment/
 *.whl
+encryption_key
+saved_config.json
